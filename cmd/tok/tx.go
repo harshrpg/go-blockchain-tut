@@ -39,10 +39,6 @@ func txAddCmd() *cobra.Command {
 			// TODO: Collect data from flags and add a transaction check for the data
 			data, _ := cmd.Flags().GetString(flagData)
 
-			if data != "reward" {
-				data = ""
-			}
-
 			fromAcc := database.NewAccount(from)
 			toAcc := database.NewAccount(to)
 
@@ -59,7 +55,7 @@ func txAddCmd() *cobra.Command {
 			defer state.Close()
 
 			// Add a tx to an in memory array pool
-			err = state.Add(tx)
+			err = state.AddTx(tx)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)

@@ -16,21 +16,18 @@ package database
 
 import (
 	"bufio"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
+	"time"
 )
 
-type Snapshot [32]byte
-
 type State struct {
-	Balances  map[Account]uint
-	txMempool []Tx
-	dbFile    *os.File
-	snapshot  Snapshot
+	Balances        map[Account]uint
+	txMempool       []Tx
+	dbFile          *os.File
+	latestBlockHash Hash
 }
 
 // The state struct is constructed by reading the initial user balances from the genesis.json file
@@ -52,14 +49,14 @@ func NewStateFromDisk() (*State, error) {
 		balances[account] = balance
 	}
 
-	f, err := os.OpenFile(filepath.Join(cwd, "database", "tx.db"), os.O_APPEND|os.O_RDWR, 0600)
+	f, err := os.OpenFile(filepath.Join(cwd, "database", "block.db"), os.O_APPEND|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
 
 	scanner := bufio.NewScanner(f)
 
-	state := &State{balances, make([]Tx, 0), f, Snapshot{}}
+	state := &State{balances, make([]Tx, 0), f, Hash{}}
 
 	for scanner.Scan() {
 		if err := scanner.Err(); err != nil {
@@ -67,69 +64,90 @@ func NewStateFromDisk() (*State, error) {
 		}
 
 		// Convert each indicidual json line into an object
-		var tx Tx
-		json.Unmarshal(scanner.Bytes(), &tx)
-
-		// state.apply(tx) builds a state with the read transaction from the db file
-		if err := state.apply(tx); err != nil {
+		blockFsJson := scanner.Bytes()
+		var blockFs BlockFS
+		err = json.Unmarshal(blockFsJson, &blockFs)
+		if err != nil {
 			return nil, err
 		}
-	}
 
-	err = state.doSnapshot()
-	if err != nil {
-		return nil, err
+		// state.apply(tx) builds a state with the read transaction from the db file
+		if err := state.applyBlock(blockFs.Value); err != nil {
+			return nil, err
+		}
+
+		state.latestBlockHash = blockFs.Key
 	}
 
 	return state, nil
 }
 
-func (s *State) LatestSnapshot() Snapshot {
-	return s.snapshot
+func (s *State) LatestBlockHash() Hash {
+	return s.latestBlockHash
 }
 
 // Adding new transactions to the mempool
-func (s *State) Add(tx Tx) error {
+func (s *State) AddBlock(b Block) error {
+	for _, tx := range b.TXs {
+		if err := s.AddTx(tx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *State) AddTx(tx Tx) error {
 	if err := s.apply(tx); err != nil {
 		return err
 	}
 
 	s.txMempool = append(s.txMempool, tx)
-
 	return nil
 }
 
 // Persisting the transactions to the disk
-func (s *State) Persist() (Snapshot, error) {
-	// Make a copy of mempool because the s.txMempool will be modified
-	// in the loop below
-	mempool := make([]Tx, len(s.txMempool))
-	copy(mempool, s.txMempool)
+func (s *State) Persist() (Hash, error) {
+	// Create a new block with only the new transactions
+	block := NewBlock(
+		s.latestBlockHash,
+		uint64(time.Now().Unix()),
+		s.txMempool,
+	)
 
-	for i := 0; i < len(mempool); i++ {
-		txJson, err := json.Marshal(mempool[i])
-		if err != nil {
-			return Snapshot{}, err
-		}
+	blockHash, err := block.Hash()
+	if err != nil {
+		return Hash{}, err
+	}
+	fmt.Printf("Blcock Hash calculated: %x\n", blockHash)
 
-		fmt.Printf("Persisting new TX to disk:\n")
-		fmt.Printf("\t%s\n", txJson)
-		if _, err = s.dbFile.Write(append(txJson, '\n')); err != nil {
-			return Snapshot{}, err
-		}
-
-		// Perform snapshot here
-		err = s.doSnapshot()
-		if err != nil {
-			return Snapshot{}, err
-		}
-		fmt.Printf("New DB Snapshot: %x\n", s.snapshot)
-
-		// Remove the Tx written to a file from the mempool
-		s.txMempool = s.txMempool[1:]
+	blockFs := BlockFS{blockHash, block}
+	blockFsJson, err := json.Marshal(blockFs)
+	if err != nil {
+		return Hash{}, err
 	}
 
-	return s.snapshot, nil
+	fmt.Print("Persisting new Block to disk:\n")
+	fmt.Printf("\t%s\n", blockFsJson)
+
+	if _, err = s.dbFile.Write(append(blockFsJson, '\n')); err != nil {
+		return Hash{}, err
+	}
+
+	s.latestBlockHash = blockHash
+
+	// Reset the mempool
+	s.txMempool = []Tx{}
+
+	return s.latestBlockHash, nil
+}
+
+func (s *State) applyBlock(b Block) error {
+	for _, tx := range b.TXs {
+		if err := s.apply(tx); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Changing/ Validating the state
@@ -152,21 +170,4 @@ func (s *State) apply(tx Tx) error {
 // close the db file
 func (s *State) Close() error {
 	return s.dbFile.Close()
-}
-
-// creates a Snapshot of the transaction by using a new sha256 secure hashing function
-func (s *State) doSnapshot() error {
-	// Re-read the entire file from the first byte
-	_, err := s.dbFile.Seek(0, 0)
-	if err != nil {
-		return err
-	}
-
-	txsData, err := ioutil.ReadAll(s.dbFile)
-	if err != nil {
-		return err
-	}
-
-	s.snapshot = sha256.Sum256(txsData)
-	return nil
 }
