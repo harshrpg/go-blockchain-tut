@@ -1,7 +1,0 @@
-{
-    "genesis_time": "2021-04-04T00:00:00.000000000Z",
-    "chain_id": "go-blockchain-tut",
-    "balances": {
-      "owner": 1000000
-    }
-  }

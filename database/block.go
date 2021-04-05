@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 )
 
 type Hash [32]byte
@@ -27,6 +28,7 @@ type Block struct {
 
 type BlockHeader struct {
 	Parent Hash   `json:"parent"` // parent block reference
+	Number uint64 `json:"number"` // block height
 	Time   uint64 `json:"time"`
 }
 
@@ -35,8 +37,9 @@ type BlockFS struct {
 	Value Block `json:"block"`
 }
 
-func NewBlock(parent Hash, time uint64, txs []Tx) Block {
-	return Block{BlockHeader{parent, time}, txs}
+func NewBlock(parent Hash, number uint64, time uint64, txs []Tx) Block {
+	fmt.Printf("Number to be persisted: %d\n", number)
+	return Block{BlockHeader{parent, number, time}, txs}
 }
 
 func (b Block) Hash() (Hash, error) {

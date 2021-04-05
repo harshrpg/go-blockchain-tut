@@ -27,6 +27,7 @@ type State struct {
 	txMempool       []Tx
 	dbFile          *os.File
 	latestBlockHash Hash
+	latestBlock     Block
 }
 
 // The state struct is constructed by reading the initial user balances from the genesis.json file
@@ -53,7 +54,7 @@ func NewStateFromDisk(dataDir string) (*State, error) {
 
 	scanner := bufio.NewScanner(f)
 
-	state := &State{balances, make([]Tx, 0), f, Hash{}}
+	state := &State{balances, make([]Tx, 0), f, Hash{}, Block{}}
 
 	for scanner.Scan() {
 		if err := scanner.Err(); err != nil {
@@ -62,6 +63,9 @@ func NewStateFromDisk(dataDir string) (*State, error) {
 
 		// Convert each indicidual json line into an object
 		blockFsJson := scanner.Bytes()
+		if len(blockFsJson) == 0 {
+			break
+		}
 		var blockFs BlockFS
 		err = json.Unmarshal(blockFsJson, &blockFs)
 		if err != nil {
@@ -74,6 +78,7 @@ func NewStateFromDisk(dataDir string) (*State, error) {
 		}
 
 		state.latestBlockHash = blockFs.Key
+		state.latestBlock = blockFs.Value
 	}
 
 	return state, nil
@@ -83,8 +88,13 @@ func (s *State) LatestBlockHash() Hash {
 	return s.latestBlockHash
 }
 
+func (s *State) LatestBlock() Block {
+	return s.latestBlock
+}
+
 // Adding new transactions to the mempool
 func (s *State) AddBlock(b Block) error {
+	fmt.Print("\tDEBUG::Adding a new block\n")
 	for _, tx := range b.TXs {
 		if err := s.AddTx(tx); err != nil {
 			return err
@@ -94,19 +104,26 @@ func (s *State) AddBlock(b Block) error {
 }
 
 func (s *State) AddTx(tx Tx) error {
+	fmt.Print("\tDEBUG::Adding a new Transaction to Mempool\n")
 	if err := s.apply(tx); err != nil {
 		return err
 	}
 
 	s.txMempool = append(s.txMempool, tx)
+	fmt.Print("\tDEBUG::Transaction added to Mempool\n")
 	return nil
 }
 
 // Persisting the transactions to the disk
 func (s *State) Persist() (Hash, error) {
 	// Create a new block with only the new transactions
+	latestBlockHash, err := s.latestBlock.Hash()
+	if err != nil {
+		return Hash{}, err
+	}
 	block := NewBlock(
-		s.latestBlockHash,
+		latestBlockHash,
+		s.latestBlock.Header.Number+1,
 		uint64(time.Now().Unix()),
 		s.txMempool,
 	)
@@ -131,7 +148,7 @@ func (s *State) Persist() (Hash, error) {
 	}
 
 	s.latestBlockHash = blockHash
-
+	s.latestBlock = block
 	// Reset the mempool
 	s.txMempool = []Tx{}
 
