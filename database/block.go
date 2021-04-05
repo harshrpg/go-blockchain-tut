@@ -1,6 +1,7 @@
 package database
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -11,12 +12,21 @@ type Hash [32]byte
 
 // These methods override the marshalling and unmarshalling for byte array of name Hash
 func (h Hash) MarshalText() ([]byte, error) {
-	return []byte(hex.EncodeToString(h[:])), nil
+	return []byte(h.Hex()), nil
 }
 
 func (h *Hash) UnmarshalText(data []byte) error {
 	_, err := hex.Decode(h[:], data)
 	return err
+}
+
+func (h Hash) Hex() string {
+	return hex.EncodeToString(h[:])
+}
+
+func (h Hash) IsEmpty() bool {
+	emptyHash := Hash{}
+	return bytes.Equal(emptyHash[:], h[:])
 }
 
 // Block has 2 attributes, Header and Payload

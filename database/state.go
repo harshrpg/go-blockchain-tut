@@ -17,9 +17,11 @@ package database
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
+	"log"
 	"os"
-	"time"
+	"reflect"
+
+	"github.com/harshrpg/go-blockchain-tut/fs"
 )
 
 type State struct {
@@ -28,10 +30,12 @@ type State struct {
 	dbFile          *os.File
 	latestBlockHash Hash
 	latestBlock     Block
+	hasGenesisBlock bool
 }
 
 // The state struct is constructed by reading the initial user balances from the genesis.json file
 func NewStateFromDisk(dataDir string) (*State, error) {
+	dataDir = fs.ExpandPath(dataDir)
 	err := initDataDirIfNotExists(dataDir)
 	if err != nil {
 		return nil, err
@@ -54,7 +58,7 @@ func NewStateFromDisk(dataDir string) (*State, error) {
 
 	scanner := bufio.NewScanner(f)
 
-	state := &State{balances, make([]Tx, 0), f, Hash{}, Block{}}
+	state := &State{balances, make([]Tx, 0), f, Hash{}, Block{}, false}
 
 	for scanner.Scan() {
 		if err := scanner.Err(); err != nil {
@@ -73,7 +77,8 @@ func NewStateFromDisk(dataDir string) (*State, error) {
 		}
 
 		// state.apply(tx) builds a state with the read transaction from the db file
-		if err := state.applyBlock(blockFs.Value); err != nil {
+		err = applyTxs(blockFs.Value.TXs, state)
+		if err != nil {
 			return nil, err
 		}
 
@@ -92,88 +97,97 @@ func (s *State) LatestBlock() Block {
 	return s.latestBlock
 }
 
-// Adding new transactions to the mempool
-func (s *State) AddBlock(b Block) error {
-	fmt.Print("\tDEBUG::Adding a new block\n")
-	for _, tx := range b.TXs {
-		if err := s.AddTx(tx); err != nil {
+func (s *State) AddBlocks(blocks []Block) error {
+	log.Println("Adding blocks into db")
+	for i, b := range blocks {
+		log.Printf("Adding block#%d\n", i)
+		_, err := s.AddBlock(b)
+		if err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (s *State) AddTx(tx Tx) error {
-	fmt.Print("\tDEBUG::Adding a new Transaction to Mempool\n")
-	if err := s.apply(tx); err != nil {
-		return err
-	}
-
-	s.txMempool = append(s.txMempool, tx)
-	fmt.Print("\tDEBUG::Transaction added to Mempool\n")
-	return nil
-}
-
-// Persisting the transactions to the disk
-func (s *State) Persist() (Hash, error) {
-	// Create a new block with only the new transactions
-	latestBlockHash, err := s.latestBlock.Hash()
+// Adding new transactions to the mempool
+func (s *State) AddBlock(b Block) (Hash, error) {
+	log.Println("Adding a new block")
+	log.Println("Initializing state copy")
+	pendingState := s.copy()
+	log.Println("State copy completed")
+	err := applyBlock(b, pendingState)
 	if err != nil {
 		return Hash{}, err
 	}
-	block := NewBlock(
-		latestBlockHash,
-		s.latestBlock.Header.Number+1,
-		uint64(time.Now().Unix()),
-		s.txMempool,
-	)
 
-	blockHash, err := block.Hash()
+	log.Println("Calculating Block Hash")
+	blockHash, err := b.Hash()
 	if err != nil {
 		return Hash{}, err
 	}
-	fmt.Printf("Blcock Hash calculated: %x\n", blockHash)
 
-	blockFs := BlockFS{blockHash, block}
+	log.Println("Making the blockfs wrapper")
+	blockFs := BlockFS{blockHash, b}
+
+	log.Println("Marshalling blockfs into a json object")
 	blockFsJson, err := json.Marshal(blockFs)
 	if err != nil {
 		return Hash{}, err
 	}
-
-	fmt.Print("Persisting new Block to disk:\n")
-	fmt.Printf("\t%s\n", blockFsJson)
-
-	if _, err = s.dbFile.Write(append(blockFsJson, '\n')); err != nil {
+	log.Printf("Blockfs object marshalled: %x", blockFsJson)
+	log.Println("Persisting new block to disk")
+	_, err = s.dbFile.Write(append(blockFsJson, '\n'))
+	if err != nil {
 		return Hash{}, err
 	}
-
+	log.Println("Updating State balances")
+	s.Balances = pendingState.Balances
+	log.Println("Updating State's latestBlock")
+	s.latestBlock = b
+	log.Println("Updating State's latestBlockHash")
 	s.latestBlockHash = blockHash
-	s.latestBlock = block
-	// Reset the mempool
-	s.txMempool = []Tx{}
-
-	return s.latestBlockHash, nil
+	return blockHash, nil
 }
 
-func (s *State) applyBlock(b Block) error {
-	for _, tx := range b.TXs {
-		if err := s.apply(tx); err != nil {
+func applyBlock(b Block, s State) error {
+	log.Println("Validating if block can be added as a transaction")
+	nextExpectedBlockNumber := s.latestBlock.Header.Number + 1
+	log.Printf("Next Expected Block Number: %d\n", nextExpectedBlockNumber)
+
+	if s.hasGenesisBlock && b.Header.Number != nextExpectedBlockNumber {
+		log.Fatalf("Next Expected Block Number must be '%d' not '%d'", nextExpectedBlockNumber, b.Header.Number)
+	}
+
+	log.Println("Checking if current block's parent is the latest block in the db")
+	if s.hasGenesisBlock && s.latestBlock.Header.Number > 0 && !reflect.DeepEqual(b.Header.Parent, s.latestBlockHash) {
+		log.Fatalf("Next Block parent hash must be '%x' and not '%x'", s.latestBlockHash, b.Header.Parent)
+	}
+
+	log.Println("Block valid. Applying transactions")
+	return applyTxs(b.TXs, &s)
+}
+
+func applyTxs(txs []Tx, s *State) error {
+	for _, tx := range txs {
+		err := applyTx(tx, s)
+		if err != nil {
 			return err
 		}
 	}
+	log.Println("All transactions applied.")
 	return nil
 }
 
 // Changing/ Validating the state
 
-func (s *State) apply(tx Tx) error {
+func applyTx(tx Tx, s *State) error {
 	if tx.isReward() {
 		s.Balances[tx.To] += tx.Value
 		return nil
 	}
 
 	if tx.Value > s.Balances[tx.From] {
-		return fmt.Errorf("insufficient balance")
+		log.Fatalf("Wrong Tx. Sender '%s' balance is %d TOK. Tx cost is %d TOK", tx.From, s.Balances[tx.From], tx.Value)
 	}
 
 	s.Balances[tx.From] -= tx.Value
@@ -184,4 +198,38 @@ func (s *State) apply(tx Tx) error {
 // close the db file
 func (s *State) Close() error {
 	return s.dbFile.Close()
+}
+
+// Internal method to return a copy of the state for security reasons
+func (s *State) copy() State {
+	c := State{}
+	c.hasGenesisBlock = s.hasGenesisBlock
+	log.Println("Genesis Block status Copied Successfully")
+	c.latestBlock = s.latestBlock
+	log.Println("Block Copied Successfully")
+	c.latestBlockHash = s.latestBlockHash
+	log.Println("Block hash Copied Successfully")
+	c.txMempool = make([]Tx, len(s.txMempool))
+	log.Println("Block hash Copied Successfully")
+	c.Balances = make(map[Account]uint)
+	log.Println("Initializing account balance copy")
+	for acc, balance := range s.Balances {
+		c.Balances[acc] = balance
+		log.Printf("Account=%s balance copied successfully", acc)
+	}
+	log.Println("All account balances copied successfully")
+	log.Println("Initializing mempool copy")
+	for i, tx := range s.txMempool {
+		c.txMempool = append(c.txMempool, tx)
+		log.Printf("DEV::Mempool transaction#%d copied successfully", i)
+	}
+	return c
+}
+
+func (s *State) NextBlockNumber() uint64 {
+	if !s.hasGenesisBlock {
+		return uint64(0)
+	}
+
+	return s.latestBlock.Header.Number + 1
 }
