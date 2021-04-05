@@ -1,6 +1,7 @@
 package node
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 
@@ -8,6 +9,9 @@ import (
 )
 
 const DefaultHTTPPort = 8080
+const endPointStatus = "/node/status"
+const endPointSync = "/node/sync"
+const endpointSyncQueryFromBlock = "fromBlock" // /node/sync?fromBloc=0x913223...
 
 type PeerNode struct {
 	IP          string `json:"ip"`
@@ -23,14 +27,20 @@ type Node struct {
 	// To inject the state into HTTP Handlers
 	state *database.State
 
-	knownPeers []PeerNode
+	knownPeers map[string]PeerNode
+}
+
+func (pn PeerNode) TcpAddress() string {
+	return fmt.Sprintf("%s:%d", pn.IP, pn.Port)
 }
 
 func New(dataDir string, port uint64, bootstrap PeerNode) *Node {
+	knownPeers := make(map[string]PeerNode)
+	knownPeers[bootstrap.TcpAddress()] = bootstrap
 	return &Node{
 		dataDir:    dataDir,
 		port:       port,
-		knownPeers: []PeerNode{bootstrap},
+		knownPeers: knownPeers,
 	}
 }
 
@@ -39,6 +49,7 @@ func NewPeerNode(ip string, port uint64, isBootstrap bool, isActive bool) PeerNo
 }
 
 func (n *Node) Run() error {
+	ctx := context.Background()
 	fmt.Println(fmt.Sprintf("Listening on HTTP port: %d", n.port))
 
 	state, err := database.NewStateFromDisk(n.dataDir)
@@ -46,8 +57,9 @@ func (n *Node) Run() error {
 		return err
 	}
 	defer state.Close()
-
 	n.state = state
+
+	go n.sync(ctx)
 
 	// listing all the balances
 	http.HandleFunc("/balances/list", func(w http.ResponseWriter, r *http.Request) {
@@ -60,8 +72,13 @@ func (n *Node) Run() error {
 	})
 
 	// Exposing current node's state
-	http.HandleFunc("/node/status", func(rw http.ResponseWriter, r *http.Request) {
+	http.HandleFunc(endPointStatus, func(rw http.ResponseWriter, r *http.Request) {
 		statusHandler(rw, r, n)
+	})
+
+	// Sync with peers
+	http.HandleFunc(endPointSync, func(rw http.ResponseWriter, r *http.Request) {
+		syncHandler(rw, r, n.dataDir)
 	})
 
 	return http.ListenAndServe(fmt.Sprintf(":%d", DefaultHTTPPort), nil)

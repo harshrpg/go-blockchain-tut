@@ -27,9 +27,13 @@ type BalancesRes struct {
 }
 
 type StatusRes struct {
-	Hash       database.Hash `json:"block_hash"`
-	Number     uint64        `json:"block_number"`
-	KnownPeers []PeerNode    `json:"peers_known"` // tell me all your peers
+	Hash       database.Hash       `json:"block_hash"`
+	Number     uint64              `json:"block_number"`
+	KnownPeers map[string]PeerNode `json:"peers_known"` // tell me all your peers
+}
+
+type SyncRes struct {
+	Blocks []database.Block `json:"blocks"`
 }
 
 func statusHandler(rw http.ResponseWriter, r *http.Request, n *Node) {
@@ -68,4 +72,22 @@ func txAddHandler(w http.ResponseWriter, r *http.Request, state *database.State)
 
 func listBalancesHandler(w http.ResponseWriter, r *http.Request, state *database.State) {
 	writeRes(w, BalancesRes{state.LatestBlockHash(), state.Balances})
+}
+
+func syncHandler(rw http.ResponseWriter, r *http.Request, dataDir string) {
+	reqHash := r.URL.Query().Get(endpointSyncQueryFromBlock)
+	hash := database.Hash{}
+	err := hash.UnmarshalText([]byte(reqHash))
+	if err != nil {
+		writeErrRes(rw, err)
+		return
+	}
+
+	blocks, err := database.GetBlocksAfter(hash, dataDir)
+	if err != nil {
+		writeErrRes(rw, err)
+		return
+	}
+
+	writeRes(rw, SyncRes{Blocks: blocks})
 }
